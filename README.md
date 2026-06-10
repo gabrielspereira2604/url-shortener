@@ -82,8 +82,38 @@ POST /shorten { url: "https://exemplo.com/pagina-longa" }
 GET /aB3kZm
   → busca no Redis (hit? redirect imediato)
   → miss? busca no PostgreSQL WHERE code = 'aB3kZm'
-  → atualiza Redis com TTL
+  → repopula o Redis
   → redirect 302 para a URL original
 ```
 
 Redis é obrigatório aqui, não opcional — encurtadores de link têm volume de leitura muito maior que de escrita.
+
+## Estratégia de cache (Redis LFU)
+
+### Por que não TTL fixo?
+
+Com TTL fixo (ex: 7 dias), links populares expiram e voltam a bater no banco desnecessariamente. Links esquecidos ficam ocupando memória até o TTL vencer.
+
+### LFU — Least Frequently Used
+
+O Redis é configurado com limite de memória e política de eviction `allkeys-lfu`:
+
+```
+maxmemory 256mb
+maxmemory-policy allkeys-lfu
+```
+
+O Redis rastreia a frequência de acesso de cada key. Quando a memória enche, descarta automaticamente os links menos acessados — links populares ficam em cache naturalmente, links raramente acessados são removidos.
+
+É a abordagem usada por encurtadores em produção como bit.ly e t.co.
+
+**LFU vs LRU:**
+
+| | Critério de descarte |
+|---|---|
+| LRU (Least Recently Used) | menos recentemente acessado — ignora frequência |
+| LFU (Least Frequently Used) | menos frequentemente acessado — mais preciso para este caso |
+
+Um link acessado 1 milhão de vezes mas sem acesso há uma semana não deve ser descartado antes de um link acessado uma única vez ontem. LFU resolve isso, LRU não.
+
+**Links com expiração explícita** (`expiresAt`) ainda recebem `AbsoluteExpiration` no Redis para garantir que expirem na data correta, independente da política de eviction.
