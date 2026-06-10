@@ -64,6 +64,8 @@ public class ShortLinkService(AppDbContext db, IDistributedCache cache)
         if (link.ExpiresAt.HasValue)
             options.SetAbsoluteExpiration(link.ExpiresAt.Value);
 
+        // No TTL for permanent links — Redis manages eviction via allkeys-lfu policy.
+        // Frequently accessed links stay in cache; unused ones are evicted when memory is full.
         await cache.SetStringAsync(CacheKeyPrefix + link.Code, link.OriginalUrl, options, ct);
     }
 
