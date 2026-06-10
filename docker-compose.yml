@@ -17,7 +17,7 @@ services:
     command: >
       redis-server
       --maxmemory 256mb
-      --maxmemory-policy allkeys-lfu
+      --maxmemory-policy allkeys-lru
 
 volumes:
   postgres_data:
