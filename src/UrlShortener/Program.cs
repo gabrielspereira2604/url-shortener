@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using UrlShortener.BackgroundJobs;
 using UrlShortener.Features;
 using UrlShortener.Persistence;
 
@@ -12,6 +13,7 @@ builder.Services.AddStackExchangeRedisCache(options =>
     options.Configuration = builder.Configuration.GetConnectionString("Redis"));
 
 builder.Services.AddScoped<ShortLinkService>();
+builder.Services.AddHostedService<ExpiredLinkCleanupJob>();
 
 var app = builder.Build();
 
