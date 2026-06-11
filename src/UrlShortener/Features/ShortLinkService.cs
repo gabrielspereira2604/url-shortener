@@ -1,14 +1,16 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Distributed;
+using Microsoft.Extensions.Caching.Memory;
 using UrlShortener.Persistence;
 using UrlShortener.ShortCode;
 
 namespace UrlShortener.Features;
 
-public class ShortLinkService(AppDbContext db, IDistributedCache cache)
+public class ShortLinkService(AppDbContext db, IMemoryCache l1, IDistributedCache l2)
 {
     private const int MaxCollisionRetries = 5;
     private const string CacheKeyPrefix = "shortlink:";
+    private static readonly TimeSpan L1Ttl = TimeSpan.FromSeconds(30);
 
     public async Task<ShortLink> CreateAsync(string originalUrl, DateTimeOffset? expiresAt, CancellationToken ct)
     {
@@ -42,9 +44,17 @@ public class ShortLinkService(AppDbContext db, IDistributedCache cache)
 
     public async Task<ShortLink?> ResolveAsync(string code, CancellationToken ct)
     {
-        var cached = await cache.GetStringAsync(CacheKeyPrefix + code, ct);
-        if (cached is not null)
-            return new ShortLink { Code = code, OriginalUrl = cached };
+        var key = CacheKeyPrefix + code;
+
+        if (l1.TryGetValue(key, out string? l1Url))
+            return new ShortLink { Code = code, OriginalUrl = l1Url! };
+
+        var l2Url = await l2.GetStringAsync(key, ct);
+        if (l2Url is not null)
+        {
+            SetL1(key, l2Url);
+            return new ShortLink { Code = code, OriginalUrl = l2Url };
+        }
 
         var link = await db.ShortLinks
             .AsNoTracking()
@@ -59,15 +69,22 @@ public class ShortLinkService(AppDbContext db, IDistributedCache cache)
 
     private async Task SetCacheAsync(ShortLink link, CancellationToken ct)
     {
+        var key = CacheKeyPrefix + link.Code;
         var options = new DistributedCacheEntryOptions();
 
         if (link.ExpiresAt.HasValue)
             options.SetAbsoluteExpiration(link.ExpiresAt.Value);
 
-        // No TTL for permanent links — Redis manages eviction via allkeys-lfu policy.
-        // Frequently accessed links stay in cache; unused ones are evicted when memory is full.
-        await cache.SetStringAsync(CacheKeyPrefix + link.Code, link.OriginalUrl, options, ct);
+        // No TTL for permanent links — Redis manages eviction via allkeys-lru policy.
+        await l2.SetStringAsync(key, link.OriginalUrl, options, ct);
+        SetL1(key, link.OriginalUrl);
     }
+
+    private void SetL1(string key, string url) =>
+        l1.Set(key, url, new MemoryCacheEntryOptions
+        {
+            AbsoluteExpirationRelativeToNow = L1Ttl
+        });
 
     private static bool IsUniqueConstraintViolation(DbUpdateException ex) =>
         ex.InnerException?.Message.Contains("unique", StringComparison.OrdinalIgnoreCase) ?? false;
