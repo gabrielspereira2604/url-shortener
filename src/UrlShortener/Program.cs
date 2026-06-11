@@ -15,6 +15,12 @@ builder.Services.AddScoped<ShortLinkService>();
 
 var app = builder.Build();
 
+using (var scope = app.Services.CreateScope())
+{
+    var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    await dbContext.Database.MigrateAsync();
+}
+
 app.UseHttpsRedirection();
 
 app.MapPost("/shorten", async (ShortenLinkRequest request, ShortLinkService service, CancellationToken ct) =>
@@ -39,3 +45,6 @@ app.MapGet("/{code}", async (string code, ShortLinkService service, Cancellation
 });
 
 app.Run();
+
+public partial class Program;
+

@@ -6,7 +6,7 @@ using UrlShortener.ShortCode;
 
 namespace UrlShortener.Features;
 
-public class ShortLinkService(AppDbContext db, IMemoryCache l1, IDistributedCache l2)
+public class ShortLinkService(AppDbContext db, IMemoryCache l1, IDistributedCache l2, ILogger<ShortLinkService> logger)
 {
     private const int MaxCollisionRetries = 5;
     private const string CacheKeyPrefix = "shortlink:";
@@ -49,11 +49,18 @@ public class ShortLinkService(AppDbContext db, IMemoryCache l1, IDistributedCach
         if (l1.TryGetValue(key, out string? l1Url))
             return new ShortLink { Code = code, OriginalUrl = l1Url! };
 
-        var l2Url = await l2.GetStringAsync(key, ct);
-        if (l2Url is not null)
+        try
         {
-            SetL1(key, l2Url);
-            return new ShortLink { Code = code, OriginalUrl = l2Url };
+            var l2Url = await l2.GetStringAsync(key, ct);
+            if (l2Url is not null)
+            {
+                SetL1(key, l2Url, expiresAt: null);
+                return new ShortLink { Code = code, OriginalUrl = l2Url };
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Redis unavailable, falling back to database for code {Code}.", code);
         }
 
         var link = await db.ShortLinks
@@ -76,15 +83,34 @@ public class ShortLinkService(AppDbContext db, IMemoryCache l1, IDistributedCach
             options.SetAbsoluteExpiration(link.ExpiresAt.Value);
 
         // No TTL for permanent links — Redis manages eviction via allkeys-lru policy.
-        await l2.SetStringAsync(key, link.OriginalUrl, options, ct);
-        SetL1(key, link.OriginalUrl);
+        try
+        {
+            await l2.SetStringAsync(key, link.OriginalUrl, options, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Redis unavailable, skipping cache write for code {Code}.", link.Code);
+        }
+
+        SetL1(key, link.OriginalUrl, link.ExpiresAt);
     }
 
-    private void SetL1(string key, string url) =>
+    private void SetL1(string key, string url, DateTimeOffset? expiresAt)
+    {
+        // Respect the link's expiration so L1 doesn't outlive an expired link.
+        var ttl = L1Ttl;
+        if (expiresAt.HasValue)
+        {
+            var remaining = expiresAt.Value - DateTimeOffset.UtcNow;
+            if (remaining <= TimeSpan.Zero) return;
+            ttl = remaining < L1Ttl ? remaining : L1Ttl;
+        }
+
         l1.Set(key, url, new MemoryCacheEntryOptions
         {
-            AbsoluteExpirationRelativeToNow = L1Ttl
+            AbsoluteExpirationRelativeToNow = ttl
         });
+    }
 
     private static bool IsUniqueConstraintViolation(DbUpdateException ex) =>
         ex.InnerException?.Message.Contains("unique", StringComparison.OrdinalIgnoreCase) ?? false;
